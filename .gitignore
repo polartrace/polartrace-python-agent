@@ -1,0 +1,27 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / build output
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# Agent runtime output
+*.log
+polartrace_agent.log
+polartrace.config.json
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp

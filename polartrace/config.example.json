@@ -1,0 +1,7 @@
+{
+  "polartrace": {
+    "app_name": "my-service",
+    "license_key": "your-license-key-minimum-10-characters",
+    "console_log": false
+  }
+}

@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polartrace"
+version = "1.0.0"
+description = "Production-ready observability agent for Python (Django, Flask, FastAPI) with request logging and distributed tracing"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [{name = "PolarTrace", email = "tech@polartrace.com"}]
+keywords = [
+    "polartrace",
+    "observability",
+    "monitoring",
+    "tracing",
+    "opentelemetry",
+    "django",
+    "flask",
+    "fastapi",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    # Transport
+    "requests>=2.25.0",
+    # Host metrics (CPU / memory / load / uptime).  Cross-platform stdlib equivalent.
+    "psutil>=5.9.0",
+    # OpenTelemetry core - required for trace capture.
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    # Incoming HTTP server instrumentations (load when the framework is present).
+    "opentelemetry-instrumentation-fastapi>=0.41b0",
+    "opentelemetry-instrumentation-flask>=0.41b0",
+    "opentelemetry-instrumentation-django>=0.41b0",
+    # Outgoing HTTP client instrumentations - mirrors what the Node.js agent
+    # gets from its native http patch.
+    "opentelemetry-instrumentation-requests>=0.41b0",
+    "opentelemetry-instrumentation-urllib3>=0.41b0",
+    "opentelemetry-instrumentation-httpx>=0.41b0",
+    # Database instrumentations - pymongo provides the same MongoDB tracing
+    # the Node.js agent has via its custom mongo instrumentation.
+    "opentelemetry-instrumentation-pymongo>=0.41b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.41b0",
+    "opentelemetry-instrumentation-psycopg2>=0.41b0",
+    "opentelemetry-instrumentation-redis>=0.41b0",
+]
+
+# No optional extras: `pip install polartrace` gives you traces, logs, host metrics,
+# and every supported framework / client integration in a single command.
+
+[project.urls]
+Homepage = "https://www.polartrace.com"
+Repository = "https://github.com/polartrace/polartrace-python-agent"
+"Bug Tracker" = "https://github.com/polartrace/polartrace-python-agent/issues"
+Changelog = "https://github.com/polartrace/polartrace-python-agent/blob/master/CHANGELOG.md"
+
+[project.scripts]
+polartrace = "polartrace.__main__:main"
+polartrace-admin = "polartrace.admin_cli:main"
+
+[tool.setuptools.package-data]
+polartrace = ["config.example.json", "py.typed"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["polartrace*"]
