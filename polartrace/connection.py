@@ -2,8 +2,8 @@
 Connection probe for the PolarTrace collector.
 
 Used by ``polartrace-admin test`` and by the ``PolarTrace`` agent at startup.
-The collector URL is **not** user-configurable; it is the ``BASE_URL`` constant on
-``PolarTrace`` and changing it requires a code edit.
+The collector URL defaults to the ``BASE_URL`` constant on ``PolarTrace``. Set
+``POLARTRACE_ENDPOINT`` to point a staging or local deployment somewhere else.
 """
 
 from __future__ import annotations
@@ -16,12 +16,12 @@ try:
 except ImportError:  # pragma: no cover - requests is a hard dep, but be defensive
     requests = None  # type: ignore
 
-from polartrace.agent import PolarTrace
+from polartrace.agent import resolve_collector_base_url
 
 
 def collector_base_url() -> str:
-    """Single source of truth for the collector base URL."""
-    return PolarTrace.BASE_URL
+    """Single source of truth for the collector base URL (honours POLARTRACE_ENDPOINT)."""
+    return resolve_collector_base_url()
 
 
 @dataclass

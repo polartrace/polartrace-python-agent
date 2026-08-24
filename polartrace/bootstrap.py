@@ -85,6 +85,9 @@ def _try_patch_fastapi(agent: Any) -> None:
             return
         self._polartrace_middleware_attached = True
         self.add_middleware(FastAPIPolarTraceMiddleware, agent=agent)
+        # Instrument traces here, where `self` is the actual FastAPI app.
+        # (Middleware constructors only ever see the next ASGI app in the chain.)
+        agent._instrument_traces(self, "fastapi")
 
     fastapi.FastAPI.__init__ = _wrapped_init  # type: ignore[assignment]
     fastapi.FastAPI._polartrace_patched = True  # type: ignore[attr-defined]
@@ -122,6 +125,15 @@ def _try_patch_django(agent: Any) -> None:
             current = list(getattr(settings, "MIDDLEWARE", None) or [])
             if _DJANGO_MIDDLEWARE_PATH not in current:
                 settings.MIDDLEWARE = [_DJANGO_MIDDLEWARE_PATH, *current]
+            # OTel's Django instrumentor works by inserting its own middleware
+            # into settings.MIDDLEWARE, so it must run before Django reads the
+            # list here - calling it any later (e.g. from the PolarTrace
+            # middleware's __init__, which runs inside load_middleware) means
+            # no SERVER spans are ever produced.
+            from polartrace.agent import auto_init_from_env
+            _agent = auto_init_from_env()
+            if _agent:
+                _agent._instrument_traces(None, "django")
         except Exception:
             # Never break Django's own startup; fall through to original behaviour.
             pass

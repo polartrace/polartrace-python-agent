@@ -16,7 +16,7 @@ pip install -e .
 ## Working on the agent
 
 - The package lives in `polartrace/`; middleware per framework in `polartrace/middleware/`.
-- Try changes against the apps in `examples/` — point the agent at your own
+- Try changes against the apps in `examples/` - point the agent at your own
   collector while developing.
 - `polartrace-admin test` checks connectivity; `polartrace-admin trace-test`
   sends a synthetic trace end to end.
@@ -31,4 +31,4 @@ pip install -e .
 
 Open a GitHub issue with the agent version, Python version, framework and
 version (Flask/FastAPI/Django), and a minimal reproduction. For security
-issues see [SECURITY.md](SECURITY.md) — do not open a public issue.
+issues see [SECURITY.md](SECURITY.md) - do not open a public issue.

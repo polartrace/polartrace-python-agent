@@ -55,6 +55,29 @@ def _set_global_agent(agent: "PolarTrace") -> None:
     globals()["_POLARTRACE_AGENT"] = agent
 
 
+def resolve_collector_base_url() -> str:
+    """
+    Collector base URL: production unless ``POLARTRACE_ENDPOINT`` says otherwise.
+
+    Deployments that are not production - a staging environment, a local collector during
+    an integration test - previously had no way to redirect the agent, because the URL was
+    a constant with no override. That made the Python integration impossible to exercise
+    anywhere except against live production.
+
+    Accepts either the collector root or a full ingest URL (``.../api/log``), so the same
+    value works here and in the Node.js agent's ``POLARTRACE_ENDPOINT``.
+    """
+    raw = (os.environ.get("POLARTRACE_ENDPOINT") or "").strip()
+    if not raw:
+        return PolarTrace.DEFAULT_BASE_URL
+    base = raw.rstrip("/")
+    for suffix in ("/log", "/traces", "/host-metrics"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return base or PolarTrace.DEFAULT_BASE_URL
+
+
 class PolarTrace:
     """
     PolarTrace observability agent for Python web apps.
@@ -65,12 +88,19 @@ class PolarTrace:
         enable_console_log: Debug logging
         capture_headers/capture_body/capture_query: Request capture flags
 
-    Note: the collector URL is a hard-coded constant (``BASE_URL``); it is not user-configurable.
+    Note: the collector URL defaults to production and is overridable only through the
+    ``POLARTRACE_ENDPOINT`` environment variable, for pointing an app at a staging or
+    local collector. The config file deliberately cannot set it.
     """
 
-    BASE_URL = "https://collector.polartrace.com/api"
+    DEFAULT_BASE_URL = "https://collector.polartrace.com/api"
+    BASE_URL = DEFAULT_BASE_URL
     FLUSH_INTERVAL = 10
     API_TIMEOUT = 10
+    _MAX_LOG_QUEUE = 5000  # drop-oldest bound, mirrors host_metrics._MAX_QUEUE
+    _MAX_TRACE_QUEUE = 5000  # drop-oldest bound, mirrors host_metrics._MAX_QUEUE
+    _MAX_BATCH = 500  # max items shipped per flush tick
+    _MAX_BACKOFF = 300  # seconds - retry backoff ceiling (5 minutes)
 
     def __init__(
         self,
@@ -88,7 +118,7 @@ class PolarTrace:
 
         self._api_key = api_key
         self._service_name = service_name
-        self._base_url = self.BASE_URL
+        self._base_url = resolve_collector_base_url()
         self._log_url = f"{self._base_url}/log"
         self._traces_url = f"{self._base_url}/traces"
         self._host_metrics_url = f"{self._base_url}/host-metrics"
@@ -103,6 +133,13 @@ class PolarTrace:
         self._trace_lock = threading.Lock()
         self._is_flushing = False
         self._is_trace_flushing = False
+        # Retry backoff state, tracked per stream. While the deadline is in the
+        # future, flush ticks for that stream are skipped; the deadline doubles
+        # on each consecutive retained failure.
+        self._log_consecutive_failures = 0
+        self._log_backoff_until = 0.0
+        self._trace_consecutive_failures = 0
+        self._trace_backoff_until = 0.0
         self._flush_timer: Optional[threading.Timer] = None
         self._log_path = os.path.join(os.getcwd(), "polartrace_agent.log")
         self._connection_status = "pending"
@@ -228,6 +265,9 @@ class PolarTrace:
         """Queue a trace span for flushing."""
         with self._trace_lock:
             self._trace_queue.append(span)
+            if len(self._trace_queue) > self._MAX_TRACE_QUEUE:
+                # Drop oldest to bound memory, like the host metrics sampler does.
+                self._trace_queue = self._trace_queue[-self._MAX_TRACE_QUEUE:]
 
     def _setup_flush_timer(self) -> None:
         if not self._base_url:
@@ -257,20 +297,43 @@ class PolarTrace:
         """
         return status_code == 429 or status_code >= 500
 
+    @staticmethod
+    def _retry_after_seconds(response: Any) -> Optional[float]:
+        """Parse a Retry-After header (delay in seconds) from a response, if present."""
+        try:
+            raw = response.headers.get("Retry-After")
+            seconds = float(raw) if raw else None
+            return seconds if seconds and seconds > 0 else None
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    def _next_backoff(self, consecutive_failures: int, retry_after: Optional[float] = None) -> float:
+        """Exponential backoff for retained failures: 10s, 20s, 40s... capped at
+        ``_MAX_BACKOFF``. When the collector sent a Retry-After (429), honor the
+        larger of the two."""
+        backoff = min(self.FLUSH_INTERVAL * (2 ** (consecutive_failures - 1)), self._MAX_BACKOFF)
+        return max(backoff, retry_after or 0.0)
+
     def _flush_logs(self) -> None:
         if self._is_flushing:
+            return
+        if time.monotonic() < self._log_backoff_until:
+            # Backing off after a retained failure - skip this tick.
             return
         with self._log_lock:
             if not self._log_queue:
                 return
-            to_send = list(self._log_queue)
-            self._log_queue.clear()
+            to_send = self._log_queue[:self._MAX_BATCH]
+            del self._log_queue[:self._MAX_BATCH]
 
         self._is_flushing = True
         try:
             if self._session and self._log_url:
                 r = self._session.post(self._log_url, json={"logs": to_send}, timeout=self.API_TIMEOUT)
-                if r.status_code not in range(200, 300):
+                if r.status_code in range(200, 300):
+                    self._log_consecutive_failures = 0
+                    self._log_backoff_until = 0.0
+                else:
                     try:
                         err_body = r.text[:500] if r.text else "(no body)"
                     except Exception:
@@ -282,26 +345,42 @@ class PolarTrace:
                     if self._should_retain(r.status_code):
                         with self._log_lock:
                             self._log_queue = to_send + self._log_queue
+                            if len(self._log_queue) > self._MAX_LOG_QUEUE:
+                                self._log_queue = self._log_queue[-self._MAX_LOG_QUEUE:]
+                        self._log_consecutive_failures += 1
+                        retry_after = self._retry_after_seconds(r) if r.status_code == 429 else None
+                        self._log_backoff_until = time.monotonic() + self._next_backoff(
+                            self._log_consecutive_failures, retry_after
+                        )
                     else:
                         # 4xx (other than 429) is deterministic: the collector will
                         # never accept this batch, so retrying forever would just
                         # block every newer log behind it and grow memory unbounded.
                         self._write_log(f"PolarTrace: Dropping {len(to_send)} rejected log(s) (HTTP {r.status_code}).")
+                        self._log_consecutive_failures = 0
+                        self._log_backoff_until = 0.0
         except Exception as e:
             self._write_log(f"PolarTrace: Failed to send logs: {e}. Check collector URL and network.")
             with self._log_lock:
                 self._log_queue = to_send + self._log_queue
+                if len(self._log_queue) > self._MAX_LOG_QUEUE:
+                    self._log_queue = self._log_queue[-self._MAX_LOG_QUEUE:]
+            self._log_consecutive_failures += 1
+            self._log_backoff_until = time.monotonic() + self._next_backoff(self._log_consecutive_failures)
         finally:
             self._is_flushing = False
 
     def _flush_traces(self) -> None:
         if self._is_trace_flushing:
             return
+        if time.monotonic() < self._trace_backoff_until:
+            # Backing off after a retained failure - skip this tick.
+            return
         with self._trace_lock:
             if not self._trace_queue:
                 return
-            to_send = list(self._trace_queue)
-            self._trace_queue.clear()
+            to_send = self._trace_queue[:self._MAX_BATCH]
+            del self._trace_queue[:self._MAX_BATCH]
 
         self._is_trace_flushing = True
         try:
@@ -309,19 +388,35 @@ class PolarTrace:
                 r = self._session.post(
                     self._traces_url, json={"spans": to_send}, timeout=self.API_TIMEOUT
                 )
-                if r.status_code not in range(200, 300):
+                if r.status_code in range(200, 300):
+                    self._trace_consecutive_failures = 0
+                    self._trace_backoff_until = 0.0
+                else:
                     self._write_log(
                         f"PolarTrace: Failed to send traces - HTTP {r.status_code}: {r.text[:200] if r.text else '(no body)'}"
                     )
                     if self._should_retain(r.status_code):
                         with self._trace_lock:
                             self._trace_queue = to_send + self._trace_queue
+                            if len(self._trace_queue) > self._MAX_TRACE_QUEUE:
+                                self._trace_queue = self._trace_queue[-self._MAX_TRACE_QUEUE:]
+                        self._trace_consecutive_failures += 1
+                        retry_after = self._retry_after_seconds(r) if r.status_code == 429 else None
+                        self._trace_backoff_until = time.monotonic() + self._next_backoff(
+                            self._trace_consecutive_failures, retry_after
+                        )
                     else:
                         self._write_log(f"PolarTrace: Dropping {len(to_send)} rejected span(s) (HTTP {r.status_code}).")
+                        self._trace_consecutive_failures = 0
+                        self._trace_backoff_until = 0.0
         except Exception as e:
             self._write_log(f"PolarTrace: Failed to send traces: {e}")
             with self._trace_lock:
                 self._trace_queue = to_send + self._trace_queue
+                if len(self._trace_queue) > self._MAX_TRACE_QUEUE:
+                    self._trace_queue = self._trace_queue[-self._MAX_TRACE_QUEUE:]
+            self._trace_consecutive_failures += 1
+            self._trace_backoff_until = time.monotonic() + self._next_backoff(self._trace_consecutive_failures)
         finally:
             self._is_trace_flushing = False
 
@@ -402,6 +497,9 @@ class PolarTrace:
         api_log = {k: v for k, v in api_log.items() if v is not None}
         with self._log_lock:
             self._log_queue.append(api_log)
+            if len(self._log_queue) > self._MAX_LOG_QUEUE:
+                # Drop oldest to bound memory, like the host metrics sampler does.
+                self._log_queue = self._log_queue[-self._MAX_LOG_QUEUE:]
 
     def _instrument_traces(self, app: Any, framework: str) -> None:
         """Instrument the app for OpenTelemetry tracing. Called by framework middleware."""

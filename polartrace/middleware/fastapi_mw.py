@@ -24,7 +24,16 @@ class FastAPIPolarTraceMiddleware(BaseHTTPMiddleware):
                 "or pass agent= to add_middleware(FastAPIPolarTraceMiddleware, agent=agent)"
             )
         self.agent = agent
-        agent._instrument_traces(app, "fastapi")
+        # Starlette constructs middleware with the next ASGI app in the chain,
+        # not the FastAPI instance - only instrument when handed the real app
+        # (manual `FastAPIPolarTraceMiddleware(app, agent=...)` wrapping). The
+        # zero-code path instruments in bootstrap, where the FastAPI app exists.
+        try:
+            from fastapi import FastAPI as _FastAPI
+            if isinstance(app, _FastAPI):
+                agent._instrument_traces(app, "fastapi")
+        except ImportError:
+            pass
         super().__init__(app, self.dispatch)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
